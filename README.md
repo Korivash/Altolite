@@ -57,6 +57,17 @@ AltoLite keeps a snapshot of every character on your account and shows them all 
 - Minimap button and Addon Compartment entry
 - Window scale, size and position are remembered; ESC closes it
 
+## Make it yours
+
+Open `/alto options` and go to **Appearance**:
+- Color wheel for the accent, window background, header, row stripes, row hover, text and border
+- Background opacity from solid down to fully transparent
+- Border style, font size, row height and window scale
+- Class-colored names, compact mode, show or hide the header summary
+- Presets: Default Dark, Transparent, Midnight Purple, Light and Class Color, plus a reset button
+
+Every change applies instantly, no reload needed.
+
 ## Performance
 
 AltoLite is designed to stay out of the way:

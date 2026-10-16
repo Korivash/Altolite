@@ -1,5 +1,5 @@
 ## Interface: 120105
-## Version: 0.3.0
+## Version: 0.4.0
 ## Author: Korivash
 ## Title: AltoLite
 ## Notes: A fast account-wide alt dashboard.
