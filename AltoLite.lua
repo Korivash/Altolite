@@ -1,6 +1,6 @@
 local addonName, addon = ...
 local eventFrame = CreateFrame("Frame")
-local defaults = { columns = { name = true, level = true, itemLevel = true, rating = true, keystone = true, vault = true, gold = true, seen = true }, currencies = {}, sortKey = "name", sortAscending = true, realmFilter = "All realms", width = 960, height = 480, scale = 1, minimap = { hide = false, angle = 220 }, display = { showRealm = true }, appearance = { accent = { 0.25, 0.72, 0.95, 1 }, background = { 0.035, 0.045, 0.06, 0.98 }, header = { 0.10, 0.15, 0.21, 1 }, stripe = { 0.14, 0.17, 0.21, 0.18 }, hover = { 0.25, 0.72, 0.95, 0.18 }, text = { 0.9, 0.92, 0.95, 1 }, borderColor = { 0.24, 0.30, 0.37, 1 }, border = 1, fontSize = 12, rowHeight = 24, classNames = true, summary = true, compact = false }, accent = { 0.25, 0.72, 0.95 }, weeklyQuestIDs = {} }
+local defaults = { columns = { name = true, level = true, itemLevel = true, rating = true, keystone = true, vault = true, gold = true, seen = true }, currencies = {}, sortKey = "name", sortAscending = true, realmFilter = "All realms", width = 960, height = 480, scale = 1, lastTab = "Overview", minimap = { hide = false, angle = 220 }, display = { showRealm = true }, appearance = { accent = { 0.25, 0.72, 0.95, 1 }, background = { 0.035, 0.045, 0.06, 0.98 }, header = { 0.10, 0.15, 0.21, 1 }, stripe = { 0.14, 0.17, 0.21, 0.18 }, hover = { 0.25, 0.72, 0.95, 0.18 }, text = { 0.9, 0.92, 0.95, 1 }, borderColor = { 0.24, 0.30, 0.37, 1 }, border = 1, fontSize = 12, rowHeight = 24, classNames = true, summary = true, compact = false }, accent = { 0.25, 0.72, 0.95 }, weeklyQuestIDs = {} }
 local columnOrder = { "name", "level", "itemLevel", "rating", "keystone", "vault", "gold", "seen" }
 local columnLabels = { name = "Character", level = "Level", itemLevel = "Item level", rating = "M+", keystone = "Keystone", vault = "Vault", gold = "Gold", seen = "Last seen" }
 local columnWidths = { name = 190, level = 60, itemLevel = 88, rating = 58, keystone = 150, vault = 132, gold = 105, seen = 130 }
@@ -256,6 +256,12 @@ local function backdrop(frame, color, border)
     frame:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
     frame:SetBackdropBorderColor(border[1], border[2], border[3], border[4] or 1)
 end
+local function glassBackdrop(frame, color, border)
+    if not frame.SetBackdrop then return backdrop(frame, color, border) end
+    frame:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 8, edgeSize = 12, insets = { left = 3, right = 3, top = 3, bottom = 3 } })
+    frame:SetBackdropColor(color[1], color[2], color[3], color[4] or 1)
+    frame:SetBackdropBorderColor(border[1], border[2], border[3], border[4] or 1)
+end
 appearance = function()
     return AltoLiteDB and AltoLiteDB.settings and AltoLiteDB.settings.appearance or defaults.appearance
 end
@@ -263,11 +269,14 @@ local function applyAppearance()
     if InCombatLockdown and InCombatLockdown() then refreshPending = true; return end
     local a = appearance()
     if mainFrame then
-        widgetCall(mainFrame, "SetScale", AltoLiteDB.settings.scale or 1)
-        backdrop(mainFrame, a.background, a.border == 0 and { 0, 0, 0, 0 } or a.borderColor)
+        widgetCall(mainFrame, "SetScale", (AltoLiteDB and AltoLiteDB.settings and AltoLiteDB.settings.scale) or 1)
+        glassBackdrop(mainFrame, a.background, a.border == 0 and { 0, 0, 0, 0 } or a.accent)
+        if mainFrame.glassWash and type(mainFrame.glassWash.SetGradient) == "function" and type(CreateColor) == "function" then
+            safeCall(mainFrame.glassWash.SetGradient, mainFrame.glassWash, "VERTICAL", CreateColor(a.accent[1], a.accent[2], a.accent[3], 0.12), CreateColor(a.accent[1], a.accent[2], a.accent[3], 0))
+        end
         if mainFrame.header then backdrop(mainFrame.header, a.header, a.header) end
         if mainFrame.content and mainFrame.content.headerBg then mainFrame.content.headerBg:SetVertexColor(a.header[1], a.header[2], a.header[3], a.header[4] or 1) end
-        if mainFrame.summary then mainFrame.summary:SetShown(a.summary) end
+        if mainFrame.statChips then for _, chip in ipairs(mainFrame.statChips) do chip:SetShown(a.summary) end end
         if mainFrame.Refresh then mainFrame:Refresh() end
     end
 end
@@ -301,27 +310,57 @@ local function cellText(row, index)
     if not row.cells[index] then row.cells[index] = text(row) end
     return row.cells[index]
 end
+local function layoutColumns(columns, availableWidth)
+    local total = 0
+    for _, col in ipairs(columns) do total = total + col[3] end
+    local scale = total > availableWidth and availableWidth / total or 1
+    local result, x = {}, 0
+    for i, col in ipairs(columns) do
+        local width = i == #columns and math.max(36, availableWidth - x) or math.max(36, math.floor(col[3] * scale))
+        result[#result + 1] = { col[1], col[2], width, x }
+        x = x + width
+    end
+    return result
+end
+local function resetRowCells(row)
+    for _, cell in ipairs(row.cells) do cell:SetText(""); cell:Hide() end
+    for _, tip in ipairs(row.tooltipCells or {}) do tip:Hide() end
+    if row.edge then row.edge:Hide() end
+end
 local function createMainFrame()
     if mainFrame or not CreateFrame then return mainFrame end
+    local settings = AltoLiteDB and AltoLiteDB.settings or {}
+    for _, savedTab in ipairs(tabs) do if savedTab == settings.lastTab then activeTab = savedTab end end
     local frame = CreateFrame("Frame", "AltoLiteFrame", UIParent, "BackdropTemplate")
     mainFrame = frame
-    frame:SetSize(math.max(960, AltoLiteDB.settings.width or defaults.width), math.max(420, AltoLiteDB.settings.height or defaults.height))
-    widgetCall(frame, "SetMinResize", 960, 420)
-    widgetCall(frame, "SetScale", AltoLiteDB.settings.scale or 1)
+    frame:SetSize(math.max(760, settings.width or defaults.width), math.max(430, settings.height or defaults.height))
+    if type(frame.SetResizeBounds) == "function" then widgetCall(frame, "SetResizeBounds", 760, 430) else widgetCall(frame, "SetMinResize", 760, 430) end
+    widgetCall(frame, "SetScale", settings.scale or 1)
     frame:SetPoint("CENTER")
     frame:SetMovable(true); widgetCall(frame, "SetResizable", true); widgetCall(frame, "SetClampedToScreen", true); frame:EnableMouse(true); frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing(); local point, _, relative, x, y = self:GetPoint(1); AltoLiteDB.settings.point = { point, relative, x, y } end)
-    backdrop(frame, { 0.035, 0.045, 0.06, 0.98 }, { 0.24, 0.30, 0.37, 1 })
+    glassBackdrop(frame, appearance().background, appearance().accent)
+    local wash = frame:CreateTexture(nil, "BACKGROUND", nil, 1); frame.glassWash = wash; wash:SetTexture("Interface\\Buttons\\WHITE8X8"); wash:SetPoint("TOPLEFT", 4, -4); wash:SetPoint("BOTTOMRIGHT", -4, 4)
+    local washAccent = appearance().accent
+    if type(wash.SetGradient) == "function" and type(CreateColor) == "function" then safeCall(wash.SetGradient, wash, "VERTICAL", CreateColor(washAccent[1], washAccent[2], washAccent[3], 0.12), CreateColor(washAccent[1], washAccent[2], washAccent[3], 0)) else wash:SetVertexColor(washAccent[1], washAccent[2], washAccent[3], 0.04) end
     if AltoLiteDB.settings.point then local p = AltoLiteDB.settings.point; frame:ClearAllPoints(); frame:SetPoint(p[1], UIParent, p[2], p[3], p[4]) end
-    local header = CreateFrame("Frame", nil, frame, "BackdropTemplate"); frame.header = header; header:SetPoint("TOPLEFT", 1, -1); header:SetPoint("TOPRIGHT", -1, -1); header:SetHeight(32)
+    local header = CreateFrame("Frame", nil, frame, "BackdropTemplate"); frame.header = header; header:SetPoint("TOPLEFT", 1, -1); header:SetPoint("TOPRIGHT", -1, -1); header:SetHeight(38)
     backdrop(header, appearance().header, appearance().header)
-    local icon = header:CreateTexture(nil, "ARTWORK"); icon:SetSize(20, 20); icon:SetPoint("LEFT", 8, 0); icon:SetTexture("Interface\\AddOns\\AltoLite\\icon.png")
-    local title = text(header); title:SetPoint("LEFT", icon, "RIGHT", 8, 0); title:SetText("AltoLite"); widgetCall(title, "SetFont", "Fonts\\FRIZQT__.TTF", 14, "OUTLINE")
+    local icon = header:CreateTexture(nil, "ARTWORK"); icon:SetSize(25, 25); icon:SetPoint("LEFT", 12, 0); icon:SetTexture("Interface\\AddOns\\AltoLite\\icon.png")
+    local title = text(header); title:SetPoint("LEFT", icon, "RIGHT", 10, 0); title:SetText("ALTOLITE"); widgetCall(title, "SetFont", "Fonts\\FRIZQT__.TTF", 15, "OUTLINE"); title:SetTextColor(0.93, 0.96, 1)
     local close = CreateFrame("Button", nil, header, "BackdropTemplate"); close:SetSize(24, 24); close:SetPoint("RIGHT", -7, 0); backdrop(close, { 0.10, 0.15, 0.21, 1 }, { 0.24, 0.30, 0.37, 1 }); close.label = text(close); close.label:SetPoint("TOPLEFT"); close.label:SetPoint("BOTTOMRIGHT"); widgetCall(close.label, "SetJustifyH", "CENTER"); close.label:SetText("X"); close:SetScript("OnEnter", function(self) backdrop(self, { 0.35, 0.12, 0.14, 1 }, { 0.65, 0.25, 0.28, 1 }) end); close:SetScript("OnLeave", function(self) backdrop(self, { 0.10, 0.15, 0.21, 1 }, { 0.24, 0.30, 0.37, 1 }) end); close:SetScript("OnClick", function() frame:Hide() end)
-    frame.summary = text(frame, "GameFontHighlightSmall"); frame.summary:SetPoint("TOPLEFT", 14, -41); frame.summary:SetPoint("TOPRIGHT", -14, -41); widgetCall(frame.summary, "SetJustifyH", "LEFT"); frame.summary:SetShown(appearance().summary)
-    frame.timer = text(frame, "GameFontHighlightSmall"); frame.timer:SetPoint("TOPRIGHT", -190, -45); frame.timer:SetTextColor(0.72, 0.78, 0.85)
-    frame.search = CreateFrame("EditBox", nil, frame, "InputBoxTemplate"); frame.search:SetSize(160, 22); frame.search:SetPoint("TOPRIGHT", -18, -45); widgetCall(frame.search, "SetAutoFocus", false); widgetCall(frame.search, "SetTextInsets", 6, 6, 0, 0); frame.search:SetScript("OnTextChanged", function() frame:Refresh() end)
+    frame.summary = text(frame, "GameFontHighlightSmall"); frame.summary:Hide(); frame.statChips = {}
+    local chipLabels = { "GOLD", "CHARACTERS", "BEST ILVL", "BEST M+" }
+    for i, label in ipairs(chipLabels) do
+        local chip = CreateFrame("Frame", nil, frame, "BackdropTemplate"); chip:SetSize(i == 2 and 112 or 104, 30); chip:SetPoint("TOPLEFT", 14 + (i - 1) * 112, -43)
+        backdrop(chip, { 0.07, 0.10, 0.14, 0.95 }, { 0.13, 0.20, 0.28, 1 })
+        chip.caption = text(chip); chip.caption:SetPoint("TOPLEFT", 8, -3); chip.caption:SetText(label); widgetCall(chip.caption, "SetFont", "Fonts\\FRIZQT__.TTF", 8, "OUTLINE"); chip.caption:SetTextColor(0.48, 0.72, 0.86)
+        chip.value = text(chip); chip.value:SetPoint("BOTTOMLEFT", 8, 3); chip.value:SetText("—"); widgetCall(chip.value, "SetFont", "Fonts\\FRIZQT__.TTF", 11, "OUTLINE"); chip.value:SetTextColor(0.92, 0.95, 1)
+        frame.statChips[i] = chip
+    end
+    frame.timer = text(frame, "GameFontHighlightSmall"); frame.timer:SetPoint("TOPRIGHT", -205, -55); frame.timer:SetTextColor(0.62, 0.76, 0.88)
+    frame.search = CreateFrame("EditBox", nil, frame, "InputBoxTemplate"); frame.search:SetSize(180, 24); frame.search:SetPoint("TOPRIGHT", -18, -94); widgetCall(frame.search, "SetAutoFocus", false); widgetCall(frame.search, "SetTextInsets", 9, 8, 0, 0); frame.search:SetScript("OnTextChanged", function() frame:Refresh() end)
     if UIDropDownMenuTemplate and UIDropDownMenu_Initialize and UIDropDownMenu_CreateInfo and UIDropDownMenu_AddButton and ToggleDropDownMenu then
         frame.realmDropdown = CreateFrame("Frame", "AltoLiteRealmDropdown", frame, "UIDropDownMenuTemplate")
         frame.realmDropdown:SetPoint("TOPRIGHT", frame.search, "TOPLEFT", -8, 4)
@@ -338,35 +377,46 @@ local function createMainFrame()
             end
         end)
     end
-    local tabBar = CreateFrame("Frame", nil, frame); tabBar:SetPoint("TOPLEFT", 14, -68); tabBar:SetSize(540, 28); frame.tabButtons = {}
+    local tabBar = CreateFrame("Frame", nil, frame); tabBar:SetPoint("TOPLEFT", 14, -126); tabBar:SetSize(540, 28); frame.tabButtons = {}
     for i, name in ipairs(tabs) do
-        local button = CreateFrame("Button", nil, tabBar, "BackdropTemplate"); button:SetSize(82, 24); button:SetPoint("LEFT", (i - 1) * 88, 0); backdrop(button, { 0.07, 0.09, 0.12, 1 }, { 0.20, 0.25, 0.31, 1 })
+        local button = CreateFrame("Button", nil, tabBar, "BackdropTemplate"); button:SetSize(84, 26); button:SetPoint("LEFT", (i - 1) * 86, 0); backdrop(button, { 0.07, 0.09, 0.12, 1 }, { 0.20, 0.25, 0.31, 1 })
         button.label = text(button); button.label:SetPoint("TOPLEFT"); button.label:SetPoint("BOTTOMRIGHT"); widgetCall(button.label, "SetJustifyH", "CENTER"); button.label:SetText(name)
-        button:SetScript("OnClick", function() activeTab = name; frame:Refresh() end); frame.tabButtons[i] = button
+        button:SetScript("OnLeave", function(self) if tabs[i] ~= activeTab then backdrop(self, { 0.055, 0.07, 0.095, 1 }, { 0.14, 0.19, 0.25, 1 }) end end)
+        button:SetScript("OnClick", function() activeTab = name; AltoLiteDB.settings.lastTab = name; frame:Refresh(true) end); frame.tabButtons[i] = button
     end
-    frame.content = CreateFrame("Frame", nil, frame); frame.content:SetPoint("TOPLEFT", 14, -100); frame.content:SetPoint("BOTTOMRIGHT", -14, 14)
+    for i = 1, #tabs do
+        local button = frame.tabButtons[i]
+        button:SetScript("OnEnter", function(self) if tabs[i] ~= activeTab then backdrop(self, { appearance().accent[1] * .16, appearance().accent[2] * .16, appearance().accent[3] * .16, 1 }, appearance().accent) end end)
+    end
+    frame.content = CreateFrame("Frame", nil, frame); frame.content:SetPoint("TOPLEFT", 14, -158); frame.content:SetPoint("BOTTOMRIGHT", -14, 14)
     frame.content.headerBg = frame.content:CreateTexture(nil, "BACKGROUND"); frame.content.headerBg:SetTexture("Interface\\Buttons\\WHITE8X8"); frame.content.headerBg:SetVertexColor(appearance().header[1], appearance().header[2], appearance().header[3], appearance().header[4] or 1); frame.content.headerBg:SetPoint("TOPLEFT", 0, 0); frame.content.headerBg:SetPoint("TOPRIGHT", 0, 0); frame.content.headerBg:SetHeight(24)
     frame.empty = text(frame.content, "GameFontHighlight"); frame.empty:SetPoint("TOP", 0, -64); frame.empty:SetText("No characters yet. Your character will appear after entering the world.")
     frame.rows, frame.headers = {}, {}
-    frame.Refresh = function(self)
+    frame.Refresh = function(self, animate)
         if InCombatLockdown and InCombatLockdown() then refreshPending = true; return end
         local chars, all, gold, bestIlvl, bestScore, realms = filteredCharacters(), {}, 0, 0, 0, { ["All realms"] = true }
         for _, char in pairs(AltoLiteDB.characters) do gold = gold + (tonumber(char.gold) or 0); bestIlvl = math.max(bestIlvl, tonumber(char.itemLevel) or 0); bestScore = math.max(bestScore, tonumber(char.rating) or 0); realms[char.realm or "Unknown"] = true end
-        self.summary:SetText("Account " .. goldString(gold) .. "     " .. tostring(#(function() local t = {}; for _ in pairs(AltoLiteDB.characters) do t[#t + 1] = true end; return t end)()) .. " characters     Best ilvl " .. string.format("%.1f", bestIlvl) .. "     Best M+ " .. tostring(bestScore))
+        local charCount = 0; for _ in pairs(AltoLiteDB.characters) do charCount = charCount + 1 end
+        self.statChips[1].value:SetText(goldString(gold)); self.statChips[2].value:SetText(tostring(charCount)); self.statChips[3].value:SetText(string.format("%.1f", bestIlvl)); self.statChips[4].value:SetText(tostring(bestScore))
         for i, name in ipairs(tabs) do
             local active = name == activeTab
-            frame.tabButtons[i].label:SetText(active and "|cff59c7ff" .. name .. "|r" or name)
-            backdrop(frame.tabButtons[i], active and { appearance().accent[1] * 0.32, appearance().accent[2] * 0.32, appearance().accent[3] * 0.32, 1 } or { 0.07, 0.09, 0.12, 1 }, active and appearance().accent or appearance().borderColor)
+            frame.tabButtons[i].label:SetText(active and "|cff9de1ff" .. name .. "|r" or name)
+            backdrop(frame.tabButtons[i], active and { appearance().accent[1] * 0.28, appearance().accent[2] * 0.28, appearance().accent[3] * 0.28, 1 } or { 0.055, 0.07, 0.095, 1 }, active and appearance().accent or { 0.14, 0.19, 0.25, 1 })
         end
-        for _, h in ipairs(self.headers) do h:Hide() end
-        for _, row in ipairs(self.rows) do row:Hide() end
+        for _, h in ipairs(self.headers) do if h.label then h.label:SetText(""); h.label:Hide() end; h:Hide() end
+        for _, row in ipairs(self.rows) do row:Hide(); resetRowCells(row) end
         local function addHeader(label, x, width, key)
             local headerIndex = #self.headers + 1
             local h = self.headers[headerIndex]
             if not h then h = CreateFrame("Button", nil, self.content); self.headers[headerIndex] = h end
             h:ClearAllPoints(); h:SetPoint("TOPLEFT", x, 0); h:SetSize(width, 24)
-            if not h.label then h.label = text(h); h.label:SetPoint("TOPLEFT"); h.label:SetPoint("BOTTOMRIGHT"); widgetCall(h.label, "SetJustifyH", "LEFT") end
-            h.label:SetText(label:upper() .. (AltoLiteDB.settings.sortKey == key and (AltoLiteDB.settings.sortAscending and "  ↑" or "  ↓") or "")); widgetCall(h.label, "SetFont", "Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+            if not h.label then h.label = text(h); h.label:SetPoint("TOPLEFT", 0, 0); h.label:SetPoint("BOTTOMRIGHT", -12, 0); widgetCall(h.label, "SetJustifyH", "LEFT"); h.sortArrow = h:CreateTexture(nil, "OVERLAY"); h.sortArrow:SetSize(8, 8); h.sortArrow:SetPoint("RIGHT", -2, 0); h.sortArrow:SetTexture("Interface\\Buttons\\Arrow-Up-Up") end
+            h.label:Show(); h.label:SetWidth(width - 8)
+            h.label:SetText(label:upper()); widgetCall(h.label, "SetFont", "Fonts\\FRIZQT__.TTF", 10, "OUTLINE"); widgetCall(h.label, "SetWordWrap", false); widgetCall(h.label, "SetMaxLines", 1); widgetCall(h.label, "SetJustifyH", "LEFT")
+            if key and AltoLiteDB.settings.sortKey == key then
+                if AltoLiteDB.settings.sortAscending then h.sortArrow:SetTexCoord(0, 1, 0, 1) else h.sortArrow:SetTexCoord(0, 1, 1, 0) end
+                h.sortArrow:Show()
+            else h.sortArrow:Hide() end
             h:SetScript("OnClick", function() if key then if AltoLiteDB.settings.sortKey == key then AltoLiteDB.settings.sortAscending = not AltoLiteDB.settings.sortAscending else AltoLiteDB.settings.sortKey = key; AltoLiteDB.settings.sortAscending = true end; self:Refresh() end end); h:Show()
         end
         local columns = {}
@@ -376,15 +426,34 @@ local function createMainFrame()
         elseif activeTab == "Currencies" then columns = { { "name", "Character", 200 } }; local seen = {}; for _, entry in ipairs(chars) do for id, c in pairs(entry.data.currencies or {}) do if not seen[id] then seen[id] = true; columns[#columns + 1] = { "currency:" .. id, (c.icon and "|T" .. c.icon .. ":14|t " or "") .. (c.name or id), 120 } end end end
         elseif activeTab == "Weekly" then columns = { { "name", "Character", 200 }, { "weekly", "Vault and weekly quests", 500 } }
         else columns = { { "name", "Character", 200 }, { "lockouts", "Raid lockouts", 400 } } end
+        local contentWidth = self.content:GetWidth()
+        if not contentWidth or contentWidth < 100 then contentWidth = (self:GetWidth() or defaults.width) - 28 end
+        columns = layoutColumns(columns, contentWidth)
         local x = 0
         for _, col in ipairs(columns) do addHeader(col[2], x, col[3], col[1]); x = x + col[3] end
+        if #chars == 0 then
+            local message = activeTab == "Lockouts" and "No lockouts this week" or activeTab == "Currencies" and "No tracked currencies yet" or "No characters match this view"
+            self.empty:SetText(message)
+        else self.empty:SetText("No characters yet. Your character will appear after entering the world.") end
         self.empty:SetShown(#chars == 0)
         for index, entry in ipairs(chars) do
             local row = self.rows[index]
-            if not row then row = CreateFrame("Button", nil, self.content, "BackdropTemplate"); row.cells = {}; row:SetScript("OnEnter", function(self) detailTooltip(self.character); local ap = appearance(); backdrop(self, ap.hover, ap.border == 0 and { 0, 0, 0, 0 } or ap.borderColor); self.edge:Show() end); row:SetScript("OnLeave", function(self) if GameTooltip then GameTooltip:Hide() end; local ap = appearance(); backdrop(self, self.rowIndex % 2 == 0 and ap.stripe or { 0, 0, 0, 0 }, ap.border == 0 and { 0, 0, 0, 0 } or ap.borderColor); self.edge:Hide() end); row.cells = {}; row.edge = row:CreateTexture(nil, "OVERLAY"); row.edge:SetTexture("Interface\\Buttons\\WHITE8X8"); row.edge:SetPoint("TOPLEFT"); row.edge:SetPoint("BOTTOMLEFT"); row.edge:SetWidth(3); row.edge:Hide(); self.rows[index] = row end
+            if not row then row = CreateFrame("Button", nil, self.content, "BackdropTemplate"); row.cells = {}; row:SetScript("OnEnter", function(self) detailTooltip(self.character); local ap = appearance(); backdrop(self, ap.hover, ap.border == 0 and { 0, 0, 0, 0 } or ap.borderColor); self.edge:Show() end); row:SetScript("OnLeave", function(self) if GameTooltip then GameTooltip:Hide() end; self.activeValueTip = nil; local ap = appearance(); backdrop(self, self.rowIndex % 2 == 0 and ap.stripe or { 0, 0, 0, 0 }, ap.border == 0 and { 0, 0, 0, 0 } or ap.borderColor); self.edge:Hide() end); row:SetScript("OnUpdate", function(self)
+                if not self:IsMouseOver() or not GetCursorPosition then return end
+                local scale = self:GetEffectiveScale(); local cursorX = GetCursorPosition() / scale
+                local left = self:GetLeft() or 0; local cellIndex
+                for i, tipCell in ipairs(self.tooltipCells or {}) do
+                    local tipLeft = left + (((self.columns or {})[i] and (self.columns or {})[i][4]) or 0)
+                    if cursorX >= tipLeft and cursorX < tipLeft + (((self.columns or {})[i] and (self.columns or {})[i][3]) or 0) then cellIndex = i; break end
+                end
+                local tipCell = cellIndex and self.tooltipCells[cellIndex]
+                if tipCell and tipCell.truncated and GameTooltip then
+                    if self.activeValueTip ~= tipCell then self.fullValue = tipCell.fullValue; GameTooltip:SetOwner(self, "ANCHOR_CURSOR"); GameTooltip:ClearLines(); GameTooltip:AddLine(self.fullValue, 1, 1, 1, true); GameTooltip:Show(); self.activeValueTip = tipCell end
+                elseif self.activeValueTip then self.activeValueTip = nil; detailTooltip(self.character) end
+            end); row.cells = {}; row.edge = row:CreateTexture(nil, "OVERLAY"); row.edge:SetTexture("Interface\\Buttons\\WHITE8X8"); row.edge:SetPoint("TOPLEFT"); row.edge:SetPoint("BOTTOMLEFT"); row.edge:SetWidth(3); row.edge:Hide(); self.rows[index] = row end
             local ap = appearance(); local rowHeight = ap.compact and math.min(ap.rowHeight, 20) or ap.rowHeight; row.character = entry.data; row.rowIndex = index; row:SetHeight(rowHeight); row:SetPoint("TOPLEFT", 0, -24 - (index - 1) * rowHeight); row:SetPoint("RIGHT", 0, 0)
             backdrop(row, index % 2 == 0 and ap.stripe or { 0, 0, 0, 0 }, ap.border == 0 and { 0, 0, 0, 0 } or ap.borderColor); row.edge:SetVertexColor(unpack(ap.accent))
-            local cellX = 7
+            row.tooltipCells = row.tooltipCells or {}; row.columns = columns; row.activeValueTip = nil
             for cellIndex, col in ipairs(columns) do
                 local key, value = col[1], ""
             if key == "name" then
@@ -395,7 +464,7 @@ local function createMainFrame()
                     local classCoords = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[entry.data.class]
                     local classIcon = classCoords and "|TInterface\\GLUES\\CHARACTERCREATE\\UI-CHARACTERCREATE-CLASSES:18:18:0:0:256:256:" .. table.concat(classCoords, ":") .. "|t " or ""
                     local realm = AltoLiteDB.settings.display.showRealm and ("  |cff8996a5" .. tostring(entry.data.realm or "") .. "|r") or ""
-                    value = (player and "★ " or "") .. classIcon .. tostring(entry.data.name or "Unknown") .. realm
+                    value = (player and "|TInterface\\RaidFrame\\ReadyCheck-Ready:12:12|t " or "") .. classIcon .. tostring(entry.data.name or "Unknown") .. realm
                 elseif key == "level" then value = tostring(entry.data.level or 0)
                 elseif key == "itemLevel" then local il = tonumber(entry.data.itemLevel) or 0; local c = il >= bestIlvl and "|cffffa64d" or il >= bestIlvl * .95 and "|cffa56bff" or il >= bestIlvl * .85 and "|cff4c9fff" or il >= bestIlvl * .7 and "|cff56d277" or "|cffaaaaaa"; value = c .. string.format("%.1f", il) .. "|r"
                 elseif key == "rating" then value = tostring(entry.data.rating or 0); local color = safeCall(C_ChallengeMode and C_ChallengeMode.GetDungeonScoreRarityColor, tonumber(entry.data.rating) or 0); if color and color.GenerateHexColor then value = "|c" .. color:GenerateHexColor() .. value .. "|r" end
@@ -408,19 +477,27 @@ local function createMainFrame()
                 elseif key == "raid" or key == "dungeon" or key == "world" then local pair = (entry.data.vault or {})[key] or { 0, 0 }; value = tostring(math.min(pair[1] or 0, 3)) .. "/3"
                 elseif key == "lockouts" then local parts = {}; if entry.data.stale and entry.data.stale.lockouts then parts[1] = "Reset since last login" else for _, l in ipairs(entry.data.lockouts or {}) do parts[#parts + 1] = tostring(l.name) .. " H " .. tostring(l.progress) end end; value = #parts > 0 and table.concat(parts, "  ·  ") or "No active lockouts"
                 elseif key:find("currency:", 1, true) == 1 then local c = (entry.data.currencies or {})[key:sub(10)]; value = c and tostring(c.quantity or 0) or "—" end
-                local cell = cellText(row, cellIndex); cell:ClearAllPoints(); cell:SetPoint("LEFT", row, "LEFT", cellX, 0); cell:SetWidth(col[3] - 8); cell:SetWordWrap(false); widgetCall(cell, "SetFont", "Fonts\\FRIZQT__.TTF", ap.fontSize, ""); widgetCall(cell, "SetJustifyH", key == "name" and "LEFT" or "RIGHT"); cell:SetText(value)
+                local cell = cellText(row, cellIndex); cell:ClearAllPoints(); cell:SetPoint("LEFT", row, "LEFT", (col[4] or 0) + 7, 0); cell:SetWidth(col[3] - 8); cell:SetWordWrap(false); widgetCall(cell, "SetMaxLines", 1); widgetCall(cell, "SetFont", "Fonts\\FRIZQT__.TTF", ap.fontSize, ""); widgetCall(cell, "SetJustifyH", key == "name" and "LEFT" or "RIGHT"); cell:SetText(value); cell:Show()
+                local stringWidth = cell:GetStringWidth()
+                local tip = row.tooltipCells[cellIndex]
+                if not tip then
+                    tip = CreateFrame("Button", nil, row); row.tooltipCells[cellIndex] = tip
+                    tip:EnableMouse(false)
+                end
+                tip:ClearAllPoints(); tip:SetPoint("LEFT", row, "LEFT", col[4] or 0, 0); tip:SetSize(col[3], rowHeight); tip.fullValue = value; tip.truncated = stringWidth > (col[3] - 8); tip:Show()
                 if key == "name" and ap.classNames then local r, g, b = classColor(entry.data.class); cell:SetTextColor(r, g, b) else cell:SetTextColor(unpack(ap.text)) end
-                cellX = cellX + col[3]
             end
+            for tipIndex = #columns + 1, #row.tooltipCells do row.tooltipCells[tipIndex]:Hide() end
             row:Show()
         end
-        self:SetHeight(math.max(420, AltoLiteDB.settings.height or defaults.height)); self:SetWidth(math.max(960, AltoLiteDB.settings.width or defaults.width))
+        if animate and UIFrameFade then self.content:SetAlpha(0); UIFrameFade(self.content, { mode = "IN", timeToFade = 0.12, startAlpha = 0, endAlpha = 1 }) end
+        self:SetHeight(math.max(430, AltoLiteDB.settings.height or defaults.height)); self:SetWidth(math.max(760, AltoLiteDB.settings.width or defaults.width))
     end
     local resize = CreateFrame("Button", nil, frame); resize:SetSize(18, 18); resize:SetPoint("BOTTOMRIGHT", -3, 3)
     local grip = resize:CreateTexture(nil, "OVERLAY"); grip:SetTexture("Interface\\Buttons\\WHITE8X8"); grip:SetAllPoints(resize); grip:SetVertexColor(0.45, 0.58, 0.70, 0.9)
     resize:SetScript("OnMouseDown", function() if frame.StartSizing then frame:StartSizing("BOTTOMRIGHT") end end)
     resize:SetScript("OnMouseUp", function() frame:StopMovingOrSizing(); local w, h = frame:GetSize(); AltoLiteDB.settings.width, AltoLiteDB.settings.height = w, h end)
-    frame:SetScript("OnSizeChanged", function(_, w, h) if InCombatLockdown and InCombatLockdown() then refreshPending = true; return end; AltoLiteDB.settings.width, AltoLiteDB.settings.height = w, h end)
+    frame:SetScript("OnSizeChanged", function(_, w, h) if InCombatLockdown and InCombatLockdown() then refreshPending = true; return end; AltoLiteDB.settings.width, AltoLiteDB.settings.height = w, h; if frame.Refresh then frame:Refresh() end end)
     frame:SetScript("OnShow", function() frame:Refresh(); frame.timer:SetText("Reset in " .. "—"); if frame.timerTicker then frame.timerTicker:Cancel() end; frame.timerTicker = C_Timer and C_Timer.NewTicker(1, function() if frame:IsShown() then local s = tonumber(resetSeconds()) or 0; frame.timer:SetText(string.format("Reset in %dd %02dh %02dm", math.floor(s / 86400), math.floor(s % 86400 / 3600), math.floor(s % 3600 / 60))) end end) end)
     frame:SetScript("OnHide", function() if frame.timerTicker then frame.timerTicker:Cancel(); frame.timerTicker = nil end end)
     frame:Hide()
@@ -590,6 +667,7 @@ local function initialize()
         return result
     end
     AltoLiteDB.settings = normalizeSettingReferences(settings)
+    AltoLiteDB.settings.lastTab = AltoLiteDB.settings.lastTab or "Overview"
     AltoLiteDB.version = 4
 end
 SLASH_ALTOLITE1 = "/alto"
