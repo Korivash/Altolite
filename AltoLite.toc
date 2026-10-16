@@ -1,0 +1,9 @@
+## Interface: 120105
+## Version: 0.3.0
+## Author: Korivash
+## Title: AltoLite
+## Notes: A fast account-wide alt dashboard.
+## IconTexture: Interface\AddOns\AltoLite\icon.png
+## SavedVariables: AltoLiteDB
+## Category-enUS: Interface
+AltoLite.lua
